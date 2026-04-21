@@ -2,6 +2,7 @@ import streamlit as st
 from pypdf import PdfReader, PdfWriter
 import io
 import zipfile
+import fitz  # PyMuPDF
 
 st.set_page_config(page_title="PDF 분할기", page_icon="✂️", layout="wide")
 
@@ -13,14 +14,33 @@ if "groups" not in st.session_state:
     st.session_state.groups = []
 if "step" not in st.session_state:
     st.session_state.step = "selecting"
+if "thumbnails" not in st.session_state:
+    st.session_state.thumbnails = []
+
+# ── PDF 페이지 → 썸네일 이미지 변환 (캐시) ──────────────────
+@st.cache_data(show_spinner=False)
+def generate_thumbnails(file_bytes, dpi=100):
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    thumbnails = []
+    for page in doc:
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pix = page.get_pixmap(matrix=mat)
+        thumbnails.append(pix.tobytes("png"))
+    doc.close()
+    return thumbnails
 
 # ── PDF 업로드 ───────────────────────────────────────────────
 uploaded_file = st.file_uploader("📂 PDF 파일을 업로드하세요", type=["pdf"])
 
 if uploaded_file:
-    reader = PdfReader(uploaded_file)
+    file_bytes = uploaded_file.read()
+    reader = PdfReader(io.BytesIO(file_bytes))
     total_pages = len(reader.pages)
     base_name = uploaded_file.name.replace(".pdf", "")
+
+    # 썸네일 생성
+    with st.spinner("페이지 미리보기 생성 중..."):
+        thumbnails = generate_thumbnails(file_bytes)
 
     st.success(f"✅ **{uploaded_file.name}** — 총 **{total_pages}페이지**")
     st.divider()
@@ -30,6 +50,12 @@ if uploaded_file:
     for g in st.session_state.groups:
         assigned_pages.update(g["pages"])
     remaining_pages = [i for i in range(total_pages) if i not in assigned_pages]
+
+    # ── 그룹별 색상 ──────────────────────────────────────────
+    group_colors = [
+        "#4CAF50", "#2196F3", "#FF9800", "#E91E63",
+        "#9C27B0", "#00BCD4", "#FF5722", "#607D8B",
+    ]
 
     # ══════════════════════════════════════════════════════════
     # 그룹 선택 단계
@@ -42,40 +68,87 @@ if uploaded_file:
         if st.session_state.groups:
             st.subheader("📋 현재까지 구성된 그룹")
             for i, g in enumerate(st.session_state.groups):
+                color = group_colors[i % len(group_colors)]
                 page_labels = ", ".join(f"p.{p+1}" for p in g["pages"])
                 col1, col2 = st.columns([6, 1])
-                col1.markdown(f"**그룹 {i+1}** → {page_labels}")
+                col1.markdown(
+                    f"<span style='background:{color};color:white;padding:2px 8px;"
+                    f"border-radius:4px;font-weight:bold'>그룹 {i+1}</span> → {page_labels}",
+                    unsafe_allow_html=True,
+                )
                 if col2.button("🗑️ 삭제", key=f"del_{i}"):
                     st.session_state.groups.pop(i)
                     st.rerun()
             st.divider()
 
-        # ── 남은 페이지 없으면 자동으로 완료 단계로 ─────────
+        # ── 남은 페이지 없으면 자동 완료 ────────────────────
         if not remaining_pages and st.session_state.groups:
             st.session_state.step = "done"
             st.rerun()
 
         # ── 현재 그룹 선택 UI ────────────────────────────────
-        st.subheader(f"📁 그룹 {current_group_num}에 포함할 페이지를 선택하세요")
+        current_color = group_colors[(current_group_num - 1) % len(group_colors)]
+        st.markdown(
+            f"### 📁 <span style='background:{current_color};color:white;padding:3px 10px;"
+            f"border-radius:4px'>그룹 {current_group_num}</span> 에 포함할 페이지를 선택하세요",
+            unsafe_allow_html=True,
+        )
         if assigned_pages:
-            st.caption(f"🔒 배정 완료된 페이지는 잠금 | 남은 페이지: {[p+1 for p in remaining_pages]}")
+            st.caption(f"🔒 회색 페이지는 이미 다른 그룹에 배정됨 | 남은 페이지: {[p+1 for p in remaining_pages]}")
 
-        cols_per_row = 10
+        # ── 썸네일 그리드 ────────────────────────────────────
+        cols_per_row = 5
         selected_now = []
-        rows = [remaining_pages[i:i+cols_per_row] for i in range(0, len(remaining_pages), cols_per_row)]
+        all_page_rows = [
+            list(range(total_pages))[i:i+cols_per_row]
+            for i in range(0, total_pages, cols_per_row)
+        ]
 
-        for row in rows:
+        for row in all_page_rows:
             cols = st.columns(cols_per_row)
             for j, page_idx in enumerate(row):
-                if cols[j].checkbox(f"p.{page_idx+1}", key=f"cur_p{page_idx}"):
-                    selected_now.append(page_idx)
+                is_assigned = page_idx in assigned_pages
+
+                # 어느 그룹에 속했는지 확인
+                owner_group = None
+                for gi, g in enumerate(st.session_state.groups):
+                    if page_idx in g["pages"]:
+                        owner_group = gi
+                        break
+
+                with cols[j]:
+                    if is_assigned and owner_group is not None:
+                        # 배정된 페이지: 컬러 테두리 + 그룹 배지
+                        oc = group_colors[owner_group % len(group_colors)]
+                        st.markdown(
+                            f"<div style='border:3px solid {oc};border-radius:6px;"
+                            f"opacity:0.6;overflow:hidden'>",
+                            unsafe_allow_html=True,
+                        )
+                        st.image(thumbnails[page_idx], use_container_width=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
+                        st.markdown(
+                            f"<div style='text-align:center;font-size:12px;"
+                            f"color:{oc};font-weight:bold'>그룹{owner_group+1} 배정됨</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        # 선택 가능한 페이지
+                        st.image(thumbnails[page_idx], use_container_width=True)
+                        checked = st.checkbox(
+                            f"p.{page_idx+1}",
+                            key=f"cur_p{page_idx}",
+                        )
+                        if checked:
+                            selected_now.append(page_idx)
+
+        st.divider()
 
         if selected_now:
             st.info(f"✅ 그룹 {current_group_num} 선택 중: {[p+1 for p in sorted(selected_now)]}")
         else:
-            st.caption("페이지를 선택해주세요.")
+            st.caption("위 썸네일에서 페이지를 체크해주세요.")
 
-        st.divider()
         col1, col2, col3 = st.columns(3)
 
         with col1:
@@ -128,9 +201,26 @@ if uploaded_file:
 
         st.divider()
 
-        # ── 파일명 수정 섹션 ─────────────────────────────────
+        # ── 그룹별 썸네일 미리보기 요약 ─────────────────────
+        for i, g in enumerate(st.session_state.groups):
+            color = group_colors[i % len(group_colors)]
+            st.markdown(
+                f"<span style='background:{color};color:white;padding:3px 10px;"
+                f"border-radius:4px;font-weight:bold'>그룹 {i+1}</span> "
+                f"— {len(g['pages'])}페이지",
+                unsafe_allow_html=True,
+            )
+            thumb_cols = st.columns(min(len(g["pages"]), 10))
+            for j, page_idx in enumerate(g["pages"]):
+                with thumb_cols[j]:
+                    st.image(thumbnails[page_idx], use_container_width=True)
+                    st.caption(f"p.{page_idx+1}")
+
+        st.divider()
+
+        # ── 파일명 수정 ──────────────────────────────────────
         st.subheader("✏️ 파일명 수정 (선택사항)")
-        st.caption(".pdf 확장자는 자동으로 붙습니다. 비워두면 기본 이름으로 저장됩니다.")
+        st.caption(".pdf 확장자는 자동으로 붙습니다.")
 
         custom_names = []
         for i, g in enumerate(st.session_state.groups):
@@ -141,11 +231,9 @@ if uploaded_file:
             name_input = col2.text_input(
                 label=f"파일명_{i}",
                 value=default_name,
-                placeholder=default_name,
                 label_visibility="collapsed",
                 key=f"fname_{i}",
             )
-            # 비어있으면 기본값 사용, 공백 제거, .pdf 중복 방지
             final_name = (name_input.strip() or default_name).removesuffix(".pdf") + ".pdf"
             custom_names.append(final_name)
 
@@ -164,7 +252,6 @@ if uploaded_file:
             zip_name_input = st.text_input(
                 "ZIP 파일명",
                 value=f"{base_name}_분할",
-                placeholder=f"{base_name}_분할",
             )
             zip_final_name = (zip_name_input.strip() or f"{base_name}_분할").removesuffix(".zip") + ".zip"
 
@@ -174,7 +261,7 @@ if uploaded_file:
                     zf.writestr(custom_names[i], make_pdf_bytes(g["pages"]))
 
             st.download_button(
-                label=f"⬇️ ZIP 다운로드  ({num_groups}개 파일)",
+                label=f"⬇️ ZIP 다운로드 ({num_groups}개 파일)",
                 data=zip_buffer.getvalue(),
                 file_name=zip_final_name,
                 mime="application/zip",
@@ -183,11 +270,10 @@ if uploaded_file:
             )
 
         else:
-            st.caption("각 파일을 개별적으로 다운로드하세요.")
             for i, g in enumerate(st.session_state.groups):
                 page_labels = ", ".join(f"p.{p+1}" for p in g["pages"])
                 st.download_button(
-                    label=f"⬇️ 그룹 {i+1} 다운로드  ({page_labels})  →  {custom_names[i]}",
+                    label=f"⬇️ 그룹 {i+1} 다운로드 ({page_labels}) → {custom_names[i]}",
                     data=make_pdf_bytes(g["pages"]),
                     file_name=custom_names[i],
                     mime="application/pdf",
@@ -206,8 +292,8 @@ else:
     st.markdown("""
     ### 사용 방법
     1. **PDF 업로드**
-    2. **그룹 1 페이지 선택** → `그룹 1 확정하고 다음 그룹 설정` 클릭
-    3. **그룹 2 페이지 선택** → 확정
-    4. 원하는 만큼 반복 후 **분할 설정 완료** 클릭
-    5. **ZIP** 또는 **개별 파일**로 다운로드
+    2. **페이지 미리보기**를 보면서 체크박스로 그룹 1 선택 → 확정
+    3. 그룹 2, 3... 반복 후 **분할 설정 완료**
+    4. 파일명 수정 후 **ZIP 또는 개별 파일**로 다운로드
     """)
+
