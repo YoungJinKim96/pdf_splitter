@@ -115,8 +115,8 @@ if uploaded_file:
         num_groups = len(st.session_state.groups)
         st.subheader(f"🎉 총 {num_groups}개의 PDF로 분할하겠습니다")
 
-        def make_filename(g):
-            return f"{base_name}_pages({'-'.join(str(p+1) for p in g['pages'])}).pdf"
+        def make_default_filename(g):
+            return f"{base_name}_pages({'-'.join(str(p+1) for p in g['pages'])})"
 
         def make_pdf_bytes(page_indices):
             writer = PdfWriter()
@@ -126,10 +126,28 @@ if uploaded_file:
             writer.write(buf)
             return buf.getvalue()
 
-        # 분할 요약
+        st.divider()
+
+        # ── 파일명 수정 섹션 ─────────────────────────────────
+        st.subheader("✏️ 파일명 수정 (선택사항)")
+        st.caption(".pdf 확장자는 자동으로 붙습니다. 비워두면 기본 이름으로 저장됩니다.")
+
+        custom_names = []
         for i, g in enumerate(st.session_state.groups):
             page_labels = ", ".join(f"p.{p+1}" for p in g["pages"])
-            st.markdown(f"- **그룹 {i+1}** ({len(g['pages'])}페이지: {page_labels}) → `{make_filename(g)}`")
+            default_name = make_default_filename(g)
+            col1, col2 = st.columns([1, 3])
+            col1.markdown(f"**그룹 {i+1}** ({page_labels})")
+            name_input = col2.text_input(
+                label=f"파일명_{i}",
+                value=default_name,
+                placeholder=default_name,
+                label_visibility="collapsed",
+                key=f"fname_{i}",
+            )
+            # 비어있으면 기본값 사용, 공백 제거, .pdf 중복 방지
+            final_name = (name_input.strip() or default_name).removesuffix(".pdf") + ".pdf"
+            custom_names.append(final_name)
 
         st.divider()
 
@@ -143,15 +161,22 @@ if uploaded_file:
         )
 
         if download_mode == "📦 ZIP으로 한번에 받기":
+            zip_name_input = st.text_input(
+                "ZIP 파일명",
+                value=f"{base_name}_분할",
+                placeholder=f"{base_name}_분할",
+            )
+            zip_final_name = (zip_name_input.strip() or f"{base_name}_분할").removesuffix(".zip") + ".zip"
+
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for g in st.session_state.groups:
-                    zf.writestr(make_filename(g), make_pdf_bytes(g["pages"]))
+                for i, g in enumerate(st.session_state.groups):
+                    zf.writestr(custom_names[i], make_pdf_bytes(g["pages"]))
 
             st.download_button(
                 label=f"⬇️ ZIP 다운로드  ({num_groups}개 파일)",
                 data=zip_buffer.getvalue(),
-                file_name=f"{base_name}_분할.zip",
+                file_name=zip_final_name,
                 mime="application/zip",
                 type="primary",
                 use_container_width=True,
@@ -162,9 +187,9 @@ if uploaded_file:
             for i, g in enumerate(st.session_state.groups):
                 page_labels = ", ".join(f"p.{p+1}" for p in g["pages"])
                 st.download_button(
-                    label=f"⬇️ 그룹 {i+1} 다운로드  ({page_labels})",
+                    label=f"⬇️ 그룹 {i+1} 다운로드  ({page_labels})  →  {custom_names[i]}",
                     data=make_pdf_bytes(g["pages"]),
-                    file_name=make_filename(g),
+                    file_name=custom_names[i],
                     mime="application/pdf",
                     key=f"dl_{i}",
                     use_container_width=True,
